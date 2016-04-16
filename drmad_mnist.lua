@@ -15,6 +15,7 @@ local grad = require 'autograd'
 local util = require 'autograd.util'
 local lossFuns = require 'autograd.loss'
 local optim = require 'optim'
+local dl = require 'dataload'
 -- using https://github.com/slembcke/debugger.lua
 --local debugger = require('debugger')
 
@@ -23,26 +24,16 @@ package.path = package.path .. ";/home/jie/d2/github/bigaidream-projects/drmad/h
 
 
 -- Load in MNIST
-local fullData, testData, classes = require('get-mnist')()
-trainData = {
-    size = 50000,
-    x = fullData.x[{ { 1, 50000 } }],
-    y = fullData.y[{ { 1, 50000 } }]
-}
+local trainset, validset, testset = dl.loadMNIST()
 
-validData = {
+local transValidData = {
     size = 10000,
-    x = fullData.x[{ { 50001, 60000 } }],
-    y = fullData.y[{ { 50001, 60000 } }]
-}
-
-transValidData = {
-    size = 10000,
-    x = th.FloatTensor(10000, 1, 1024):fill(0),
+    x = th.FloatTensor(10000, 1, 28*28):fill(0),
     y = th.FloatTensor(10000, 1, 10):fill(0)
 }
 
-local inputSize = trainData.x[1]:nElement()
+local inputSize = trainset.inputs[1]:nElement()
+local classes = testset.classes
 local confusionMatrix = optim.ConfusionMatrix(classes)
 
 -- What model to train:
@@ -109,12 +100,22 @@ local dfTrain = grad(fTrain, { optimize = true })
 local eLr = 0.01
 local numEpoch = 1
 -- Train a neural network to get final parameters
+local y_ = torch.FloatTensor(10)
+local function makesample(inputs, targets)
+   assert(inputs:size(1) == 1)
+   assert(inputs:dim() == 4)
+   --assert(torch.type(inputs) == 'torch.FloatTensor')
+   local x = inputs:view(1, -1)
+   y_:zero()
+   y_[targets[1]] = 1 -- onehot
+   return x, y_:view(1, 10)
+end
+
 for epoch = 1, numEpoch do
-    print('Forward Training Epoch #' .. epoch)
-    for i = 1, trainData.size do
+    print('Forward Training Epoch #' .. epoch)   
+    for i, inputs, targets in trainset:subiter(1) do
         -- Next sample:
-        local x = trainData.x[i]:view(1, inputSize)
-        local y = th.view(trainData.y[i], 1, 10)
+        local x, y = makesample(inputs, targets)
 
         -- Grads:
         local grads, loss, prediction = dfTrain(params, x, y)
@@ -146,9 +147,10 @@ finalParams = deepcopy(params)
 local shallowcopy = require 'shallowcopy'
 -- Transform validation data
 
-for t = 1, validData.size do
-    transValidData.x[t] = shallowcopy(validData.x[t]:view(1, inputSize))
-    transValidData.y[t] = shallowcopy(th.view(validData.y[t], 1, 10))
+transValidData.y:zero()
+for t, inputs, targets in validset:subiter(1) do
+    transValidData.x[t]:copy(inputs:view(-1))
+    transValidData.y[{t,1,targets[1]}] = 1 -- onehot
 end
 
 -- Define validation loss
@@ -234,7 +236,7 @@ local dHVP = grad(gradProj)
 
 ----------------------------------------------
 -- Backpropagate the validation errors
-numIter = numEpoch * (trainData.size)
+numIter = numEpoch * trainset:size()
 local beta = th.linspace(0.001, 0.999, numIter)
 
 -- learning rate for hyperparameters
@@ -243,16 +245,18 @@ local hLr = 0.01
 for epoch = 1, numEpoch do
 
     print('Backword Training Epoch #' .. epoch)
-    for i = 1, trainData.size do
+    for i, inputs, targets in trainset:subiter(1) do
         -- Next sample:
-        local x = trainData.x[i]:view(1, inputSize)
-        local y = th.view(trainData.y[i], 1, 10)
+        local x, y = makesample(inputs, targets)
+
         for j = 1, nLayers do
             params.W[j] = th.mul(initParams.W[j], (1 - beta[i + (numEpoch * (epoch-1))])) +
                     th.mul(finalParams.W[j], beta[i + (numEpoch * (epoch-1))])
             DV[j] = DV[j] + validGrads.W[j] * eLr
         end
+        
         local grads, loss = dHVP(params, x, y, proj1, proj2, proj3, DV1, DV2, DV3)
+        
         for j = 1, nLayers do
             validGrads.W[j] = validGrads.W[j] - th.mul(grads.W[j], (1.0 - hLr))
             -- grads w.r.t. HY are all zeros
