@@ -15,34 +15,27 @@ local grad = require 'autograd'
 local util = require 'autograd.util'
 local lossFuns = require 'autograd.loss'
 local optim = require 'optim'
--- using https://github.com/slembcke/debugger.lua
+local dl = require 'dataload'
+local xlua = require 'xlua'
+-- git clone https://github.com/slembcke/debugger.lua
+-- cd debugger.lua
+-- luarocks make debugger-[TAB]
 --local debugger = require('debugger')
 
 grad.optimize(true)
-package.path = package.path .. ";/home/jie/d2/github/bigaidream-projects/drmad/hypergrad_lua/?.lua"
 
 
 -- Load in MNIST
-local fullData, testData, classes = require('get-mnist')()
-trainData = {
-    size = 50000,
-    x = fullData.x[{ { 1, 50000 } }],
-    y = fullData.y[{ { 1, 50000 } }]
-}
+local trainset, validset, testset = dl.loadMNIST()
 
-validData = {
+local transValidData = {
     size = 10000,
-    x = fullData.x[{ { 50001, 60000 } }],
-    y = fullData.y[{ { 50001, 60000 } }]
-}
-
-transValidData = {
-    size = 10000,
-    x = th.FloatTensor(10000, 1, 1024):fill(0),
+    x = th.FloatTensor(10000, 1, 28*28):fill(0),
     y = th.FloatTensor(10000, 1, 10):fill(0)
 }
 
-local inputSize = trainData.x[1]:nElement()
+local inputSize = trainset.inputs[1]:nElement()
+local classes = testset.classes
 local confusionMatrix = optim.ConfusionMatrix(classes)
 
 -- What model to train:
@@ -108,13 +101,24 @@ local dfTrain = grad(fTrain, { optimize = true })
 -- elementary learning rate
 local eLr = 0.01
 local numEpoch = 1
+local epochSize = -1
 -- Train a neural network to get final parameters
+local y_ = torch.FloatTensor(10)
+local function makesample(inputs, targets)
+   assert(inputs:size(1) == 1)
+   assert(inputs:dim() == 4)
+   --assert(torch.type(inputs) == 'torch.FloatTensor')
+   local x = inputs:view(1, -1)
+   y_:zero()
+   y_[targets[1]] = 1 -- onehot
+   return x, y_:view(1, 10)
+end
+
 for epoch = 1, numEpoch do
-    print('Forward Training Epoch #' .. epoch)
-    for i = 1, trainData.size do
+    print('Forward Training Epoch #' .. epoch)   
+    for i, inputs, targets in trainset:subiter(1, epochSize) do
         -- Next sample:
-        local x = trainData.x[i]:view(1, inputSize)
-        local y = th.view(trainData.y[i], 1, 10)
+        local x, y = makesample(inputs, targets)
 
         -- Grads:
         local grads, loss, prediction = dfTrain(params, x, y)
@@ -128,8 +132,8 @@ for epoch = 1, numEpoch do
         -- Log performance:
         confusionMatrix:add(prediction[1], y[1])
         if i % 1000 == 0 then
+            print("Epoch "..epoch)
             print(confusionMatrix)
-            print(epoch)
             confusionMatrix:zero()
         end
     end
@@ -146,9 +150,10 @@ finalParams = deepcopy(params)
 local shallowcopy = require 'shallowcopy'
 -- Transform validation data
 
-for t = 1, validData.size do
-    transValidData.x[t] = shallowcopy(validData.x[t]:view(1, inputSize))
-    transValidData.y[t] = shallowcopy(th.view(validData.y[t], 1, 10))
+transValidData.y:zero()
+for t, inputs, targets in validset:subiter(1, epochSize) do
+    transValidData.x[t]:copy(inputs:view(-1))
+    transValidData.y[{t,1,targets[1]}] = 1 -- onehot
 end
 
 -- Define validation loss
@@ -178,7 +183,7 @@ validGrads = {
 -- Test network to get validation gradients w.r.t weights
 for epoch = 1, numEpoch do
     print('Forward Training Epoch #' .. epoch)
-    for i = 1, transValidData.size do
+    for i = 1, epochSize == -1 and transValidData.size or epochSize do
         -- Next sample:
         local x = transValidData.x[i]:view(1, inputSize)
         local y = th.view(transValidData.y[i], 1, 10)
@@ -208,9 +213,9 @@ local DHY = { DHY1, DHY2, DHY3 }
 
 
 local nLayers = 3
-local proj1 = th.zero(th.FloatTensor(inputSize, 50))
-local proj2 = th.zero(th.FloatTensor(50, 50))
-local proj3 = th.zero(th.FloatTensor(50, #classes))
+local proj1 = th.FloatTensor(inputSize, 50):zero()
+local proj2 = th.FloatTensor(50, 50):zero()
+local proj3 = th.FloatTensor(50, #classes):zero()
 
 
 -- Initialize derivative w.r.t. velocity
@@ -234,33 +239,48 @@ local dHVP = grad(gradProj)
 
 ----------------------------------------------
 -- Backpropagate the validation errors
-numIter = numEpoch * (trainData.size)
+numIter = numEpoch * (epochSize == -1 and trainset:size() or epochSize)
 local beta = th.linspace(0.001, 0.999, numIter)
 
 -- learning rate for hyperparameters
 local hLr = 0.01
 
+local buffer
 for epoch = 1, numEpoch do
 
     print('Backword Training Epoch #' .. epoch)
-    for i = 1, trainData.size do
+    for i, inputs, targets in trainset:subiter(1, epochSize) do
         -- Next sample:
-        local x = trainData.x[i]:view(1, inputSize)
-        local y = th.view(trainData.y[i], 1, 10)
+        local x, y = makesample(inputs, targets)
+
         for j = 1, nLayers do
-            params.W[j] = th.mul(initParams.W[j], (1 - beta[i + (numEpoch * (epoch-1))])) +
-                    th.mul(finalParams.W[j], beta[i + (numEpoch * (epoch-1))])
-            DV[j] = DV[j] + validGrads.W[j] * eLr
+            params.W[j]:mul(initParams.W[j], 1 - beta[i + (numEpoch * (epoch-1))])
+            buffer = buffer or initParams.W[j].new()
+            buffer:mul(finalParams.W[j], beta[i + (numEpoch * (epoch-1))])
+            params.W[j]:add(buffer)
+            DV[j]:add(eLr, validGrads.W[j])
         end
+        
         local grads, loss = dHVP(params, x, y, proj1, proj2, proj3, DV1, DV2, DV3)
+        
+        -- See the loss grow to NaN
+        print("loss", loss)
+        
         for j = 1, nLayers do
-            validGrads.W[j] = validGrads.W[j] - th.mul(grads.W[j], (1.0 - hLr))
-            -- grads w.r.t. HY are all zeros
-            DHY[j] = DHY[j] - th.mul(grads.HY[j], (1.0 - hLr))
-            debugger()
-            DV[j] = th.mul(DV[j], hLr)
+            buffer = buffer or DHY[j].new()
+            
+            buffer:mul(grads.W[j], 1.0 - hLr)
+            validGrads.W[j]:add(-1, buffer)
+            
+            buffer:mul(grads.HY[j], 1.0 - hLr)
+            DHY[j]:add(-1, buffer)
+            
+            DV[j]:mul(DV[j], hLr)
         end
+        --xlua.progress(i, trainset:size())
     end
 end
 
-print(DHY2)
+for i, dhy in ipairs(DHY) do
+   print("DHY "..i, dhy:sum())
+end
