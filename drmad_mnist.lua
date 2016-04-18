@@ -1,13 +1,12 @@
 --[[
 One meta-iteration for DrMAD on MNIST
-April 13, 2016
 MIT license
 
 Modified from torch-autograd's example, train-mnist-mlp.lua
 ]]
 
--- Purely stochastic training on purpose, to test the linear subspace hypothesis
--- STATUS: something wrong with hypergradients, line 257
+-- Purely stochastic training on purpose,
+-- to test the linear subspace hypothesis, epochSize=-1
 
 -- Import libs
 local th = require 'torch'
@@ -17,17 +16,11 @@ local lossFuns = require 'autograd.loss'
 local optim = require 'optim'
 local dl = require 'dataload'
 local xlua = require 'xlua'
--- git clone https://github.com/slembcke/debugger.lua
--- cd debugger.lua
--- luarocks make debugger-[TAB]
---local debugger = require('debugger')
 
 grad.optimize(true)
 
-
 -- Load in MNIST
 local trainset, validset, testset = dl.loadMNIST()
-
 local transValidData = {
     size = 10000,
     x = th.FloatTensor(10000, 1, 28*28):fill(0),
@@ -99,7 +92,8 @@ local dfTrain = grad(fTrain, { optimize = true })
 -----------------------------------
 
 -- elementary learning rate
-local eLr = 0.01
+-- set it small to avoid NaN issue
+local eLr = 0.00001
 local numEpoch = 1
 local epochSize = -1
 -- Train a neural network to get final parameters
@@ -262,8 +256,6 @@ for epoch = 1, numEpoch do
         end
         
         local grads, loss = dHVP(params, x, y, proj1, proj2, proj3, DV1, DV2, DV3)
-        
-        -- See the loss grow to NaN
         print("loss", loss)
         
         for j = 1, nLayers do
