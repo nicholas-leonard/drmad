@@ -152,7 +152,6 @@ local function train_meta()
     -- [[Backward pass]]
     -----------------------
 
-    local shallowcopy = require 'shallowcopy'
     -- Transform validation data
 
     transValidData.y:zero()
@@ -289,7 +288,7 @@ end
 
 -- Hyperparameter learning rate, cannot be too huge
 -- this is a super-parameter...
-local hLr = 0.001
+local hLr = 0.0001
 local numMeta = 3
 
 for i = 1, numMeta do
