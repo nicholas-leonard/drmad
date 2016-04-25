@@ -1,5 +1,5 @@
 --[[
-One meta-iteration for DrMAD on MNIST
+Multiple meta-iterations for DrMAD on MNIST
 MIT license
 
 Modified from torch-autograd's example, train-mnist-mlp.lua
