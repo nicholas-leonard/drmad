@@ -13,7 +13,7 @@ local lossFuns = require 'autograd.loss'
 local optim = require 'optim'
 local dl = require 'dataload'
 local xlua = require 'xlua'
-debugger = require 'fb.debugger'
+--debugger = require 'fb.debugger'
 
 grad.optimize(true)
 
@@ -30,7 +30,7 @@ local classes = testset.classes
 local confusionMatrix = optim.ConfusionMatrix(classes)
 
 local initHyper = 0.001
-local predict, fTrain, params
+local predict, fTrain, params, prevParams
 
 -- initialize hyperparameters as global variables
 -- to be shared across different meta-iterations
@@ -278,7 +278,7 @@ local function train_meta()
             -- start from the learning rate for the last time-step, i.e. reverse
             -- currently only consider weights
 
-            previousParams = deepcopy(params)
+            prevParams = nn.utils.recursiveCopy(prevParams, params)
             for j = 1, nLayers do
                 params.W[j]:mul(initParams.W[j], 1 - beta[i + (numEpoch * (epoch - 1))])
                 buffer = buffer or initParams.W[j].new()
@@ -286,8 +286,9 @@ local function train_meta()
                 params.W[j]:add(buffer)
 
                 -- using the setup 6 in Algorithm 2, ICML 2015 paper
-                VW[j] = (params.W[j]/LR[{numIter - (i-1), j}]) - (previousParams.W[j]/LR[{numIter - (i-1), j}])
-                debugger.enter()
+                local lr = LR[{numIter - (i-1), j}]
+                VW[j]:div(params.W[j], lr)
+                VW[j]:add(-1/lr, prevParams.W[j])
                 DLR[{numIter - (i-1), j}] = torch.dot(validGrads.W[j], VW[j])
                 DV[j]:add(LR[{i, j}], validGrads.W[j])
             end
@@ -324,7 +325,6 @@ for i = 1, numMeta do
     local dhy, dlr = train_meta()
     local xx = dlr[{{}, 1}]
     print(xx)
-    debugger.enter()
 
     for j = 1, #params.W do
         dhy[j]:mul(-hLr)
