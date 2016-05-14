@@ -78,7 +78,17 @@ local function train_meta()
     local W3 = torch.FloatTensor(50, #classes):uniform(-1 / math.sqrt(#classes), 1 / math.sqrt(#classes))
     local B3 = torch.FloatTensor(#classes):fill(0)
 
+    -- define velocities for weights
+    local VW1 = torch.FloatTensor(inputSize, 50):fill(0)
+    local VW2 = torch.FloatTensor(50, 50):fill(0)
+    local VW3 = torch.FloatTensor(50, #classes):fill(0)
+    local VW = { VW1, VW2, VW3 }
 
+    -- define velocities for biases
+    local VB1 = torch.FloatTensor(50):fill(0)
+    local VB2 = torch.FloatTensor(50):fill(0)
+    local VB3 = torch.FloatTensor(#classes):fill(0)
+    local VB = { VB1, VB2, VB3 }
 
     -- Trainable parameters and hyperparameters:
     params = {
@@ -130,9 +140,12 @@ local function train_meta()
             local grads, loss, prediction = dfTrain(params, x, y)
 
             -- Update weights and biases at each layer
-            for i = 1, #params.W do
-                params.W[i] = params.W[i] - grads.W[i] * eLr
-                params.B[i] = params.B[i] - grads.B[i] * eLr
+            for j = 1, #params.W do
+
+                VW[j] = VW[j]:mul(gamma) - grads.W[j]:mul(1-gamma)
+                VB[j] = VB[j]:mul(gamma) - grads.B[j]:mul(1-gamma)
+                params.W[j] = params.W[j] + VW[j] * eLr
+                params.B[j] = params.B[j] + VB[j] * eLr
             end
 
             -- Log performance:
