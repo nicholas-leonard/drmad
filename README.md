@@ -20,6 +20,12 @@ Skechy code for tuning L2 penalties and learning rates on MNIST dataset with CUD
 ## Dependencies
 * Twitter Torch Autograd: https://github.com/twitter/torch-autograd
 
+## How to run
+
+- `drmad_mnist.lua` is for tuning L2 penalties on MNIST. 
+- `cuda_drmad_mnist.lua` is for tuning L2 penalties on MNIST with CUDA. 
+- `lr_drmad_mnist.lua` is for tuning learning rates and L2 penalties on MNIST.  
+
 ## Tricks
 
 ### Rally with ([Net2Net](https://github.com/soumith/net2net.torch))
