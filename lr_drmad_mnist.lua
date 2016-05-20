@@ -13,9 +13,27 @@ local lossFuns = require 'autograd.loss'
 local optim = require 'optim'
 local dl = require 'dataload'
 local xlua = require 'xlua'
+local deepcopy = require 'deepcopy'
 --local debugger = require 'fb.debugger'
 
 grad.optimize(true)
+
+
+--[[ command line arguments ]]--
+cmd = torch.CmdLine()
+cmd:text()
+cmd:text('Multiple meta-iterations for DrMAD on MNIST tuning learning rates and L2 norms together')
+cmd:text('Options:')
+cmd:option('-cuda', false, 'use CUDA')
+cmd:option('-device', 1, 'sets the device (GPU) to use')
+cmd:option('-epochSize', -1, 'number of iterations per training epoch')
+cmd:text()
+local opt = cmd:parse(arg or {})
+
+if opt.cuda then
+   require 'cunn'
+   cutorch.setDevice(opt.device)
+end
 
 -- Load in MNIST
 local trainset, validset, testset = dl.loadMNIST()
@@ -27,90 +45,111 @@ local transValidData = {
 
 local inputSize = trainset.inputs[1]:nElement()
 local classes = testset.classes
-local confusionMatrix = optim.ConfusionMatrix(classes)
+local cm = optim.ConfusionMatrix(classes)
 
 local initHyper = 0.001
 local predict, fTrain, params, prevParams
-
--- initialize hyperparameters as global variables
--- to be shared across different meta-iterations
-local HY1 = torch.FloatTensor(inputSize, 50):fill(initHyper)
-local HY2 = torch.FloatTensor(50, 50):fill(initHyper)
-local HY3 = torch.FloatTensor(50, #classes):fill(initHyper)
 
 -- elementary learning rate: eLr
 -- set it small to avoid NaN issue
 local eLr = 0.0001
 local numEpoch = 1
 local batchSize = 1
-local epochSize = -1
+local epochSize = opt.epochSize
+local nLayers = 3
 -- number of iterations
 local numIter = numEpoch * (epochSize == -1 and trainset:size() or epochSize)
 --local numIter = 50000/numEpoch
 
+-- prototype tensor used to initialize other tensors via proto.new()
+local proto = opt.cuda and torch.CudaTensor() or torch.FloatTensor()
+
 -- initialize learning rate vector for each layer, at every iteration
-local LR = torch.FloatTensor(numIter, 3):fill(eLr)
+local LR = proto.new(numIter, 3):fill(eLr)
+
+-- Define elementary parameters
+torch.manualSeed(0)
+
+-- define velocities for weights
+local VW = { proto.new(inputSize, 50), proto.new(50, 50), proto.new(50, #classes) }
+
+-- define velocities for biases
+local VB = { proto.new(50), proto.new(50), proto.new(#classes) }
+
+-- Trainable parameters (weight and bias):
+local params = {}
+params.W = { proto.new(inputSize, 50), proto.new(50, 50), proto.new(50, #classes)}
+params.B = { proto.new(50), proto.new(50), proto.new(#classes) }
+
+-- define validGrads
+local validGrads = deepcopy(params)
+
+-- initialize hyperparameters as global variables to be shared across different meta-iterations
+params.HY = { proto.new(inputSize, 50):fill(initHyper), proto.new(50, 50):fill(initHyper), proto.new(50, #classes) }
+
+-- copies of the parameter tensors
+local initParams = deepcopy(params)
+local finalParams = deepcopy(params)
+
+-- Initialize derivative w.r.t. hyperparameters)
+local DHY = deepcopy(params.HY)
+
+-- Initialize derivative w.r.t. learning rates
+local DLR = proto.new(numIter, 3)
+
+local proj = deepcopy(params.HY)
+
+-- Initialize derivative w.r.t. velocity
+local DV = deepcopy(params.HY)
+
+local beta = torch.linspace(0.001, 0.999, numIter)
+
+-- buffers
+local y_, x_ = proto.new(), proto.new()
+
+-- What model to train:
+
+-- Define neural net
+local function predict(params, input)
+  local h1 = torch.tanh(input * params.W[1] + params.B[1])
+  local h2 = torch.tanh(h1 * params.W[2] + params.B[2])
+  local h3 = h2 * params.W[3] + params.B[3]
+  local out = util.logSoftMax(h3)
+  return out
+end
+
+-- Define training loss
+local function fTrain(params, input, target)
+  local prediction = predict(params, input)
+  local loss = lossFuns.logMultinomialLoss(prediction, target)
+  local penalty1 = torch.sum(torch.cmul(torch.cmul(params.W[1], params.HY[1]), params.W[1]))
+  local penalty2 = torch.sum(torch.cmul(torch.cmul(params.W[2], params.HY[2]), params.W[2]))
+  local penalty3 = torch.sum(torch.cmul(torch.cmul(params.W[3], params.HY[3]), params.W[3]))
+  loss = loss + penalty1 + penalty2 + penalty3
+  return loss, prediction
+end
+
 
 local function train_meta()
     --[[
     One meta-iteration to get directives w.r.t. hyperparameters
     ]]
-    -- What model to train:
-
-    -- Define neural net
-    function predict(params, input)
-        local h1 = torch.tanh(input * params.W[1] + params.B[1])
-        local h2 = torch.tanh(h1 * params.W[2] + params.B[2])
-        local h3 = h2 * params.W[3] + params.B[3]
-        local out = util.logSoftMax(h3)
-        return out
-    end
-
-    -- Define training loss
-    function fTrain(params, input, target)
-        local prediction = predict(params, input)
-        local loss = lossFuns.logMultinomialLoss(prediction, target)
-        local penalty1 = torch.sum(torch.cmul(torch.cmul(params.W[1], params.HY[1]), params.W[1]))
-        local penalty2 = torch.sum(torch.cmul(torch.cmul(params.W[2], params.HY[2]), params.W[2]))
-        local penalty3 = torch.sum(torch.cmul(torch.cmul(params.W[3], params.HY[3]), params.W[3]))
-        loss = loss + penalty1 + penalty2 + penalty3
-        return loss, prediction
-    end
-
-
-    -- Define elementary parameters
-    -- [-1/sqrt(#output), 1/sqrt(#output)]
+    
+    -- initialize elementary parameters and velocities
     torch.manualSeed(0)
-    local W1 = torch.FloatTensor(inputSize, 50):uniform(-1 / math.sqrt(50), 1 / math.sqrt(50))
-    local B1 = torch.FloatTensor(50):fill(0)
-    local W2 = torch.FloatTensor(50, 50):uniform(-1 / math.sqrt(50), 1 / math.sqrt(50))
-    local B2 = torch.FloatTensor(50):fill(0)
-    local W3 = torch.FloatTensor(50, #classes):uniform(-1 / math.sqrt(#classes), 1 / math.sqrt(#classes))
-    local B3 = torch.FloatTensor(#classes):fill(0)
+    for i, W in ipairs(params.W) do
+        local bound = 1 / math.sqrt(W:size(2))
+        W:uniform(-bound, bound)
+        VW[i]:fill(0)
+    end
+    for i, B in ipairs(params.B) do
+        B:fill(0)
+        VB[i]:fill(0)
+    end
 
-    -- define velocities for weights
-    local VW1 = torch.FloatTensor(inputSize, 50):fill(0)
-    local VW2 = torch.FloatTensor(50, 50):fill(0)
-    local VW3 = torch.FloatTensor(50, #classes):fill(0)
-    local VW = { VW1, VW2, VW3 }
-
-    -- define velocities for biases
-    local VB1 = torch.FloatTensor(50):fill(0)
-    local VB2 = torch.FloatTensor(50):fill(0)
-    local VB3 = torch.FloatTensor(#classes):fill(0)
-    local VB = { VB1, VB2, VB3 }
-
-    -- Trainable parameters and hyperparameters:
-    params = {
-        W = { W1, W2, W3 },
-        B = { B1, B2, B3 },
-        HY = { HY1, HY2, HY3 }
-    }
-
-    local deepcopy = require 'deepcopy'
-
+    
     -- copy initial weights
-    initParams = deepcopy(params)
+    initParams = nn.utils.recursiveCopy(initParams, params)
 
     -- Get the gradients closure magically:
     local dfTrain = grad(fTrain, { optimize = true })
@@ -123,15 +162,19 @@ local function train_meta()
     -- weight decay for elementary parameters
     local gamma = 0.7
     -- Train a neural network to get final parameters
-    local y_ = torch.FloatTensor(10)
     local function makesample(inputs, targets)
         assert(inputs:size(1) == 1)
         assert(inputs:dim() == 4)
-        --assert(torch.type(inputs) == 'torch.FloatTensor')
+        --assert(torch.type(inputs) == 'proto.new')
         local x = inputs:view(1, -1)
-        y_:zero()
+        if opt.cuda then
+            x_:resize(x:size()):copy(x)
+        else
+            x_ = x
+        end
+        y_:resize(10):zero()
         y_[targets[1]] = 1 -- onehot
-        return x, y_:view(1, 10)
+        return x_, y_:view(1, 10)
     end
 
     for epoch = 1, numEpoch do
@@ -153,17 +196,18 @@ local function train_meta()
             end
 
             -- Log performance:
-            confusionMatrix:add(prediction[1], y[1])
+            cm:add(prediction[1], y[1])
             if i % 1000 == 0 then
-                print("Epoch " .. epoch)
-                print(confusionMatrix)
-                confusionMatrix:zero()
+                print("Epoch " .. epoch .. ", iteration " .. i)
+                cm:updateValids()
+                print("Accuracy "..cm.totalValid)
+                cm:zero()
             end
         end
     end
 
     -- copy final parameters after convergence
-    finalParams = deepcopy(params)
+    finalParams = nn.utils.recursiveCopy(finalParams, params)
 
     ----------------------
     -- [[Backward pass]]
@@ -188,19 +232,12 @@ local function train_meta()
 
     local dfValid = grad(fValid, { optimize = true })
 
-    -- Initialize validGrads
-    local ValW1 = torch.FloatTensor(inputSize, 50):fill(0)
-    local ValB1 = torch.FloatTensor(50):fill(0)
-    local ValW2 = torch.FloatTensor(50, 50):fill(0)
-    local ValB2 = torch.FloatTensor(50):fill(0)
-    local ValW3 = torch.FloatTensor(50, #classes):fill(0)
-    local ValB3 = torch.FloatTensor(#classes):fill(0)
-
-    local validGrads = {
-        W = { ValW1, ValW2, ValW3 },
-        B = { ValB1, ValB2, ValB3 }
-    }
-
+    -- zero validGrads
+    for i=1,3 do
+        validGrads.W[i]:zero()
+        validGrads.B[i]:zero()
+    end
+    
     -- Get gradient of validation loss w.r.th. finalParams
     -- Test network to get validation gradients w.r.t weights
     for epoch = 1, numEpoch do
@@ -209,6 +246,12 @@ local function train_meta()
             -- Next sample:
             local x = transValidData.x[i]:view(1, inputSize)
             local y = torch.view(transValidData.y[i], 1, 10)
+            
+            if opt.cuda then
+               x_:resize(x:size()):copy(x)
+               y_:resize(y:size()):copy(y)
+               x, y = x_, y_
+            end
 
             -- Grads:
             local grads, loss, prediction = dfValid(params, x, y)
@@ -227,28 +270,13 @@ local function train_meta()
 
     -------------------------------------
 
-    -- Initialize derivative w.r.t. hyperparameters
-    DHY1 = torch.FloatTensor(inputSize, 50):fill(0)
-    DHY2 = torch.FloatTensor(50, 50):fill(0)
-    DHY3 = torch.FloatTensor(50, #classes):fill(0)
-    DHY = { DHY1, DHY2, DHY3 }
-
-    -- Initialize derivative w.r.t. learning rates
-    DLR = torch.FloatTensor(numIter, 3):fill(0)
-
-
-    local nLayers = 3
-    local proj1 = torch.FloatTensor(inputSize, 50):zero()
-    local proj2 = torch.FloatTensor(50, 50):zero()
-    local proj3 = torch.FloatTensor(50, #classes):zero()
-
-
-    -- Initialize derivative w.r.t. velocity
-    local DV1 = torch.FloatTensor(inputSize, 50):fill(0)
-    local DV2 = torch.FloatTensor(50, 50):fill(0)
-    local DV3 = torch.FloatTensor(50, #classes):fill(0)
-    local DV = { DV1, DV2, DV3 }
-
+    -- Initialize gradients
+    for i=1,nLayers do
+        DHY[i]:zero() -- w.r.t. hyper-params
+        proj[i]:zero()
+        DV[i]:zero() -- w.r.t. velocity
+    end
+    DLR:zero() -- w.r.t. learning rates
 
     -- https://github.com/twitter/torch-autograd/issues/66
     -- torch-autograd needs to track all variables
@@ -265,8 +293,6 @@ local function train_meta()
 
     ----------------------------------------------
     -- Backpropagate the validation errors
-
-    local beta = torch.linspace(0.001, 0.999, numIter)
 
     local buffer
     for epoch = 1, numEpoch do
@@ -294,7 +320,7 @@ local function train_meta()
                 DV[j]:add(LR[{i, j}], validGrads.W[j])
             end
 
-            local grads, loss = dHVP(params, x, y, proj1, proj2, proj3, DV1, DV2, DV3)
+            local grads, loss = dHVP(params, x, y, proj[1], proj[2], proj[3], DV[1], DV[2], DV[3])
             --        print("loss", loss)
             for j = 1, nLayers do
                 buffer = buffer or DHY[j].new()

@@ -7,8 +7,10 @@ local function deepcopy(orig)
             copy[deepcopy(orig_key)] = deepcopy(orig_value)
         end
         setmetatable(copy, deepcopy(getmetatable(orig)))
+    elseif torch.isTensor(orig) then
+        copy = orig:clone()
     else -- number, string, boolean, etc
-    copy = orig
+      copy = orig
     end
     return copy
 end
