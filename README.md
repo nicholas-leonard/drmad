@@ -34,6 +34,9 @@ ImageNet dataset usually needs ~450,000 iterations. DrMAD may not approxiate thi
 One approach would be to repeatedly initialize the weights using Net2Net, from small subsets to larget subsets
 and finally to the full dataset.
 
+### Acceleration with Model Compression
+We will add a regression loss at every layer, similar to [Distilling the Knowledge in a Neural Network](http://arxiv.org/abs/1503.02531). However, the aim here is not to compress the model, so we do not decrease the number of parameters. 
+
 ### BO and AD
 BO is a global optimization method (it can handle 20 hyperparameters at most), whereas AD can only find local solutions
 (it can handle thousands of hyperparameters because it uses gradient information). We first use BO to get some initial
