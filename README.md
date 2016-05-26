@@ -13,12 +13,12 @@ learning rates for each layer) with a reasonable time/computational budget -- re
 Skechy code for tuning L2 penalties and learning rates on MNIST dataset with CUDA support.
 
 ## TODO
-1. Experiments on CIFAR-10 and ImageNet
-2. Refactoring
+1. API for tuning learning rates, weight decay and momentum. 
+2. Experiments on ImageNet
 
 
 ## Dependencies
-* Twitter Torch Autograd: https://github.com/twitter/torch-autograd
+* [Twitter Torch Autograd](https://github.com/twitter/torch-autograd): the next version will not depend on this. 
 
 ## How to run
 
