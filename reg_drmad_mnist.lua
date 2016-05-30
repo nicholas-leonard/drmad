@@ -16,7 +16,7 @@ local lossFuns = require 'autograd.loss'
 local optim = require 'optim'
 local dl = require 'dataload'
 local xlua = require 'xlua'
-
+--local debugger = require 'fb.debugger'
 grad.optimize(true)
 
 -- Load in MNIST
@@ -68,6 +68,18 @@ local function train_meta()
     end
 
 
+    -----------------------------
+    -- define regression loss
+    function regTrain(params, input, target)
+        local loss = 0
+        for ii = 1, 3 do
+            params.W[ii] = params.W[ii] + torch.cmul(params.W[ii], input[ii])
+            loss = loss + lossFuns.leastSquares(params.W[ii], target[ii])
+        end
+        return loss
+    end
+
+
     -- Define elementary parameters
     -- [-1/sqrt(#output), 1/sqrt(#output)]
     torch.manualSeed(0)
@@ -77,6 +89,14 @@ local function train_meta()
     local B2 = torch.FloatTensor(50):fill(0)
     local W3 = torch.FloatTensor(50, #classes):uniform(-1 / math.sqrt(#classes), 1 / math.sqrt(#classes))
     local B3 = torch.FloatTensor(#classes):fill(0)
+
+
+    -- define fake input for regression
+    local fake_W1 = torch.FloatTensor(inputSize, 50):fill(1)
+    local fake_W2 = torch.FloatTensor(50, 50):fill(1)
+    local fake_W3 = torch.FloatTensor(50, #classes):fill(1)
+
+    fake_input = {fake_W1, fake_W2, fake_W3}
 
     -- define velocities for weights
     local VW1 = torch.FloatTensor(inputSize, 50):fill(0)
@@ -104,6 +124,7 @@ local function train_meta()
 
     -- Get the gradients closure magically:
     local dfTrain = grad(fTrain, { optimize = true })
+    local dfRegTrain = grad(regTrain, {optimize = true})
 
     ------------------------------------
     -- [[Forward pass]]
@@ -149,6 +170,14 @@ local function train_meta()
                 params.B[j] = params.B[j] + VB[j] * eLr
             end
 
+            -- consider regression loss update
+            if epoch > 1 then
+                local grads, loss = dfRegTrain(params,fake_input, finalParams)
+                for jj = 1, 3 do
+                    params.W[jj] = params.W[jj] + grads.W[jj] * eLr *10
+                end
+            end
+
             -- Log performance:
             confusionMatrix:add(prediction[1], y[1])
             if i % 1000 == 0 then
@@ -161,7 +190,7 @@ local function train_meta()
 
     -- copy final parameters after convergence
     finalParams = deepcopy(params)
-
+    finalParams = nn.utils.recursiveCopy(finalParams, params)
     ----------------------
     -- [[Backward pass]]
     -----------------------
@@ -302,6 +331,7 @@ end
 
 -- Hyperparameter learning rate, cannot be too huge
 -- this is a super-parameter...
+local time = sys.clock()
 local hLr = 0.0001
 local numMeta = 3
 
@@ -316,3 +346,6 @@ end
 for i, hy in ipairs(params.HY) do
     print("HY "..i, hy:sum())
 end
+
+time = sys.clock() - time
+print(time)
