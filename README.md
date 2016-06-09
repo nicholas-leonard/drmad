@@ -35,12 +35,13 @@ One approach would be to repeatedly initialize the weights using Net2Net, from s
 and finally to the full dataset.
 
 ### Acceleration with Model Compression
-We will add a regression loss at every layer, similar to [Distilling the Knowledge in a Neural Network](http://arxiv.org/abs/1503.02531). However, the aim here is not to compress the model, so we do not decrease the number of parameters. 
+We will add a regression loss at every layer, which is also used in [Deep Q-Networks for Accelerating the Training of Deep Neural Networks](https://arxiv.org/abs/1606.01467). However, the aim here is not to compress the model, so we do not decrease the number of parameters. 
 
 ### BO and AD
 BO is a global optimization method (it can handle 20 hyperparameters at most), whereas AD can only find local solutions
 (it can handle thousands of hyperparameters because it uses gradient information). We first use BO to get some initial
 average hyperparameters. Then we use AD method to further search for diverse local hyperparameters.
 
----
-:e-mail: jie _DOT_ fu A~_~T u.nus.edu~~cation~~
+## Contact
+
+If you have any problems or suggestions, please contact me: jie.fu A~_~T u.nus.edu~~cation~~
